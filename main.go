@@ -1,11 +1,14 @@
-/*
-Copyright © 2022 NAME HERE <EMAIL ADDRESS>
-
-*/
 package main
 
-import "subtract/cmd"
+import (
+	"context"
+	"os"
+	"os/signal"
+	"subtract/cmd"
+)
 
 func main() {
-	cmd.Execute()
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer cancel()
+	cmd.Execute(ctx)
 }
