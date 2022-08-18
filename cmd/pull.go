@@ -6,11 +6,9 @@ import (
 	"encoding/json"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
+	"subtract/pkg"
+	"time"
 )
-
-var gcpProject string
-var pubsubSubscription string
-var max int
 
 // pullCmd represents the pull command
 var pullCmd = &cobra.Command{
@@ -51,55 +49,62 @@ func init() {
 	viper.BindPFlag("subscription", pullCmd.Flags().Lookup("subscription"))
 	pullCmd.MarkFlagRequired("subscription")
 
-	pullCmd.Flags().IntVar(&max, "max", 1, "The number of messages to pull")
+	pullCmd.Flags().IntVar(&maxMessages, "max", 1, "The number of messages to pull")
 	viper.BindPFlag("max", pullCmd.Flags().Lookup("max"))
 }
 
 func pull(cmd *cobra.Command, args []string) {
-	ctx, cancel := context.WithCancel(cmd.Context())
-	defer cancel()
+	encoder := json.NewEncoder(cmd.OutOrStdout())
 
-	client, err := pubsub.NewClient(ctx, gcpProject)
+	client, err := pubsub.NewClient(cmd.Context(), gcpProject)
 	if err != nil {
-		cmd.PrintErr(err)
+		cmd.PrintErrln(err)
 		return
 	}
 
-	encoder := json.NewEncoder(cmd.OutOrStdout())
+	ch := logPullProgress(cmd, time.Second*5)
 
-	counter := make(chan struct{})
-	go func() {
-		acceptN(max, counter)
-		cancel()
-	}()
-
-	err = client.Subscription(pubsubSubscription).Receive(ctx, func(c context.Context, m *pubsub.Message) {
-		defer m.Nack()
-
-		select {
-		case counter <- struct{}{}:
-		case <-ctx.Done():
-			return
-		}
-
-		if Verbose {
-			cmd.Print("received message", m.ID)
+	err = pkg.ReceiveN(cmd.Context(), client, pubsubSubscription, maxMessages, func(c context.Context, m *pubsub.Message) {
+		if verbose {
+			cmd.Println("received message", m.ID)
 		}
 		encoder.Encode(m)
+		ch <- struct{}{}
 
 		m.Ack()
 	})
-	if err != nil {
-		cmd.PrintErr(err)
+	if err == cmd.Context().Err() {
+		// no error
+	} else if err != nil {
+		cmd.PrintErrln(err)
 	}
 }
 
-func acceptN(n int, ch <-chan struct{}) {
-	for {
-		n--
-		if n < 0 {
-			return
+func logPullProgress(cmd *cobra.Command, d time.Duration) chan<- struct{} {
+	ch := make(chan struct{})
+
+	ticker := time.NewTicker(d)
+	defer ticker.Stop()
+
+	go func() {
+		var fetched int
+		for {
+			select {
+			case _, more := <-ch:
+				if !more {
+					return
+				}
+				fetched++
+			case <-ticker.C:
+				if verbose {
+					cmd.Printf("Progress (Total: %d)\n", fetched)
+				}
+			case <-cmd.Context().Done():
+				cmd.Printf("Finished (Total: %d)\n", fetched)
+				return
+			}
 		}
-		<-ch
-	}
+	}()
+
+	return ch
 }

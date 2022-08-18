@@ -9,9 +9,6 @@ import (
 	"github.com/spf13/viper"
 )
 
-var cfgFile string
-var Verbose bool
-
 // rootCmd represents the base command when called without any subcommands
 var rootCmd = &cobra.Command{
 	Use:   "subtract",
@@ -40,11 +37,18 @@ func init() {
 	cobra.OnInitialize(initConfig)
 
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $HOME/.subtract.yaml)")
-	rootCmd.PersistentFlags().BoolVar(&Verbose, "verbose", false, "Whether to print debug output")
+	rootCmd.PersistentFlags().BoolVar(&verbose, "verbose", false, "Whether to print debug output")
+
+	rootCmd.PersistentFlags().StringVar(&pubsubTopic, "topic", "", "PubSub topic you wish to publish to")
+	viper.BindPFlag("topic", rootCmd.Flags().Lookup("topic"))
 
 	// Cobra also supports local flags, which will only run
 	// when this action is called directly.
 	rootCmd.Flags().BoolP("toggle", "t", false, "Help message for toggle")
+}
+
+type pubSubMessage struct {
+	Data string
 }
 
 // initConfig reads in config file and ENV variables if set.
