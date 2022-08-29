@@ -8,6 +8,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	"io"
+	"sync"
 	"time"
 )
 
@@ -15,7 +16,12 @@ import (
 var pushCmd = &cobra.Command{
 	Use:   "push",
 	Short: "Push messages to a Google PubSub topic",
-	Long: `Push messages to a Google PubSub topic. For example:
+	Long: `Push messages to a Google PubSub topic
+
+The difference between 'publish' and 'push' is that the 'publish' reads message bodies (payloads) 
+and 'push' reads PubSub message "envelopes" (which might have been fetched using 'pull').
+
+For example:
 
 subtract push \
  --project=my-project-id \
@@ -47,6 +53,7 @@ func push(cmd *cobra.Command, args []string) {
 	topic := client.Topic(pubsubTopic)
 	defer topic.Stop()
 
+	var wg sync.WaitGroup
 	for {
 		var m pubsub.Message
 		if err = decoder.Decode(&m); errors.Is(err, io.EOF) {
@@ -58,7 +65,9 @@ func push(cmd *cobra.Command, args []string) {
 
 		res := topic.Publish(cmd.Context(), &m)
 
+		wg.Add(1)
 		go func() {
+			defer wg.Done()
 			<-res.Ready()
 			_, err := res.Get(cmd.Context())
 			if err != nil {
@@ -71,6 +80,7 @@ func push(cmd *cobra.Command, args []string) {
 		publishCh <- struct{}{}
 	}
 
+	wg.Wait()
 }
 
 func logResults(cmd *cobra.Command, d time.Duration) (chan<- struct{}, chan<- error) {
