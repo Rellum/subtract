@@ -24,7 +24,7 @@ subtract republish \
 }
 
 func init() {
-	rootCmd.AddCommand(pullCmd)
+	rootCmd.AddCommand(republishCmd)
 
 	republishCmd.Flags().StringVar(&gcpProject, "project", "", "Name of the Google Cloud project")
 	viper.BindPFlag("project", republishCmd.Flags().Lookup("project"))
@@ -54,7 +54,7 @@ func republish(cmd *cobra.Command, args []string) {
 			cmd.Println("received message", m.ID)
 		}
 
-		_, err := topic.Publish(c, m).Get(c)
+		_, err := topic.Publish(c, m).Get(context.Background())
 		if err != nil {
 			m.Nack()
 			cmd.PrintErrln(err)
@@ -62,7 +62,7 @@ func republish(cmd *cobra.Command, args []string) {
 		}
 
 		if verbose {
-			fmt.Printf("published message %s. (Received: %i; Published: %i)", m.ID)
+			fmt.Printf("published message %s.\n", m.ID)
 		}
 
 		m.Ack()

@@ -3,6 +3,9 @@ package pkg
 import (
 	"cloud.google.com/go/pubsub"
 	"context"
+	"errors"
+	"sync"
+	"time"
 )
 
 func ReceiveN(ctx context.Context, client *pubsub.Client, pubsubSubscription string, maxMessages int, receiver func(c context.Context, m *pubsub.Message)) error {
@@ -13,17 +16,31 @@ func ReceiveN(ctx context.Context, client *pubsub.Client, pubsubSubscription str
 
 	subscription := client.Subscription(pubsubSubscription)
 
-	return subscription.Receive(ctx, func(c context.Context, m *pubsub.Message) {
-		select {
-		case _, more := <-ch:
-			if !more {
-				return
-			}
-			receiver(c, m)
-		case <-ctx.Done():
+	var wg sync.WaitGroup
+	var once sync.Once
+
+	err := subscription.Receive(ctx, func(c context.Context, m *pubsub.Message) {
+		wg.Add(1)
+		_, more := <-ch
+		if !more {
+			wg.Done()
+			once.Do(func() {
+				wg.Wait()
+				cancel()
+			})
+			<-c.Done()
+			m.Nack()
 			return
 		}
+
+		receiver(c, m)
+		wg.Done()
 	})
+	if !errors.Is(err, ctx.Err()) {
+		return err
+	}
+
+	return nil
 }
 
 func countN(ctx context.Context, n int) <-chan struct{} {
@@ -35,7 +52,12 @@ func countN(ctx context.Context, n int) <-chan struct{} {
 				close(counter)
 				return
 			}
-			counter <- struct{}{}
+			select {
+			case counter <- struct{}{}:
+			case <-time.After(time.Second * 5):
+				close(counter)
+				return
+			}
 		}
 	}()
 	return counter

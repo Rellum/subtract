@@ -37,7 +37,7 @@ func init() {
 	cobra.OnInitialize(initConfig)
 
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $HOME/.subtract.yaml)")
-	rootCmd.PersistentFlags().BoolVar(&verbose, "verbose", false, "Whether to print debug output")
+	rootCmd.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "Whether to print debug output")
 
 	rootCmd.PersistentFlags().StringVar(&pubsubTopic, "topic", "", "PubSub topic you wish to publish to")
 	viper.BindPFlag("topic", rootCmd.Flags().Lookup("topic"))
