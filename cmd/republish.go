@@ -57,7 +57,7 @@ func republish(cmd *cobra.Command, args []string) {
 		_, err := topic.Publish(c, m).Get(context.Background())
 		if err != nil {
 			m.Nack()
-			cmd.PrintErrln(err)
+			cmd.PrintErrln(fmt.Errorf("publish: %w", err))
 			return
 		}
 
