@@ -6,11 +6,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"sync"
 	"time"
 )
 
-func Publish(ctx context.Context, client *pubsub.Client, pubsubTopic string, scanner *bufio.Scanner, opts ...func(*options)) error {
+func Publish(ctx context.Context, client *pubsub.Client, pubsubTopic string, next func() (pubsub.Message, error), opts ...func(*options)) error {
 	cctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -69,12 +70,16 @@ func Publish(ctx context.Context, client *pubsub.Client, pubsubTopic string, sca
 	}()
 
 	var wg sync.WaitGroup
-	for scanner.Scan() {
+	for {
+		message, err := next()
+		if errors.Is(err, io.EOF) {
+			break
+		} else if err != nil {
+			return err
+		}
+
 		wg.Add(1)
-		b := append([]byte{}, scanner.Bytes()...)
-		res := topic.Publish(cctx, &pubsub.Message{
-			Data: b,
-		})
+		res := topic.Publish(cctx, &message)
 
 		go func() {
 			defer wg.Done()
@@ -88,9 +93,6 @@ func Publish(ctx context.Context, client *pubsub.Client, pubsubTopic string, sca
 	}
 	wg.Wait()
 	close(errCh)
-	if err := scanner.Err(); err != nil {
-		return err
-	}
 
 	mu.Lock()
 	stats := stats{
@@ -105,6 +107,24 @@ func Publish(ctx context.Context, client *pubsub.Client, pubsubTopic string, sca
 		return stats.Errors[len(stats.Errors)-1]
 	}
 	return nil
+}
+
+func ScanPayloads(scanner *bufio.Scanner) func() (pubsub.Message, error) {
+	return func() (pubsub.Message, error) {
+		more := scanner.Scan()
+		if !more {
+			return pubsub.Message{}, io.EOF
+		}
+
+		if err := scanner.Err(); err != nil {
+			return pubsub.Message{}, err
+		}
+
+		b := append([]byte{}, scanner.Bytes()...)
+		return pubsub.Message{
+			Data: b,
+		}, nil
+	}
 }
 
 type stats struct {

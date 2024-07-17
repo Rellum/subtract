@@ -52,7 +52,7 @@ func TestPublish(t *testing.T) {
 		}
 		w.Close()
 	}()
-	err = pkg.Publish(ctx, client, topic.ID(), scanner)
+	err = pkg.Publish(ctx, client, topic.ID(), pkg.ScanPayloads(scanner))
 	if err != nil {
 		t.Error(err)
 	}
@@ -109,7 +109,7 @@ func TestPublish_withLogs(t *testing.T) {
 		}
 		w.Close()
 	}()
-	err = pkg.Publish(ctx, client, topic.ID(), scanner, pkg.WithStatsLogging(50*time.Millisecond))
+	err = pkg.Publish(ctx, client, topic.ID(), pkg.ScanPayloads(scanner), pkg.WithStatsLogging(50*time.Millisecond))
 	if err != nil {
 		t.Error(err)
 	}
