@@ -3,62 +3,53 @@ package pkg
 import (
 	"cloud.google.com/go/pubsub"
 	"context"
-	"errors"
-	"sync"
+	"fmt"
 	"time"
 )
 
-func ReceiveN(ctx context.Context, client *pubsub.Client, pubsubSubscription string, maxMessages int, receiver func(c context.Context, m *pubsub.Message)) error {
-	ctx, cancel := context.WithCancel(ctx)
+func Receive(ctx context.Context, client *pubsub.Client, pubsubSubscription string, timeout time.Duration, receiver func(c context.Context, m *pubsub.Message)) error {
+	cctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	ch := countN(ctx, maxMessages)
-
+	ch := make(chan pubsub.Message, 100)
 	subscription := client.Subscription(pubsubSubscription)
+	go func() {
+		err := subscription.Receive(cctx, func(c context.Context, m *pubsub.Message) {
+			select {
+			case <-c.Done():
+				return
+			case ch <- *m:
+				return
+			}
+		})
+		fmt.Printf("pubsub.Client.Subscription.Receive error: %v\n", err)
+	}()
+	for {
+		timer := time.NewTimer(timeout)
+		select {
+		case m := <-ch:
+			if !timer.Stop() {
+				<-timer.C
+			}
+			receiver(cctx, &m)
 
-	var wg sync.WaitGroup
-	var once sync.Once
-
-	err := subscription.Receive(ctx, func(c context.Context, m *pubsub.Message) {
-		wg.Add(1)
-		_, more := <-ch
-		if !more {
-			wg.Done()
-			once.Do(func() {
-				wg.Wait()
-				cancel()
-			})
-			<-c.Done()
-			m.Nack()
-			return
+		case <-timer.C:
+			cancel()
+			return cctx.Err()
 		}
-
-		receiver(c, m)
-		wg.Done()
-	})
-	if !errors.Is(err, ctx.Err()) {
-		return err
 	}
-
-	return nil
 }
 
-func countN(ctx context.Context, n int) <-chan struct{} {
-	counter := make(chan struct{})
-	go func() {
-		for {
-			n--
-			if ctx.Err() != nil || n < 0 {
-				close(counter)
-				return
-			}
-			select {
-			case counter <- struct{}{}:
-			case <-time.After(time.Second * 5):
-				close(counter)
-				return
-			}
+func ReceiveN(ctx context.Context, client *pubsub.Client, pubsubSubscription string, timeout time.Duration, maxMessages int, receiver func(c context.Context, m *pubsub.Message)) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var count int
+	return Receive(ctx, client, pubsubSubscription, timeout, func(c context.Context, m *pubsub.Message) {
+		count++
+		if count > maxMessages {
+			cancel()
+			return
 		}
-	}()
-	return counter
+		receiver(c, m)
+	})
 }

@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
-	"sync"
+	"subtract/pkg"
 	"time"
 )
 
@@ -45,42 +45,13 @@ func publish(cmd *cobra.Command, args []string) {
 
 	client, err := pubsub.NewClient(cmd.Context(), gcpProject)
 	if err != nil {
-		cmd.PrintErrln(err)
-		return
+		cmd.PrintErrln(fmt.Errorf("pubsub.NewClient: %w", err))
 	}
 
-	publishCh, errCh := logResults(cmd, 5*time.Second)
-	defer func() { close(errCh) }()
-
-	topic := client.Topic(pubsubTopic)
-	defer topic.Stop()
-
-	var wg sync.WaitGroup
-	for scanner.Scan() {
-		var m pubsub.Message
-		m.Data = scanner.Bytes()
-
-		res := topic.Publish(cmd.Context(), &m)
-
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			<-res.Ready()
-			_, err := res.Get(cmd.Context())
-			if err != nil {
-				errCh <- fmt.Errorf("message %s: %w", m.ID, err)
-			} else {
-				errCh <- nil
-			}
-		}()
-
-		publishCh <- struct{}{}
+	err = pkg.Publish(cmd.Context(), client, pubsubTopic, scanner, pkg.WithStatsLogging(5*time.Second))
+	if err != nil {
+		cmd.PrintErrln(fmt.Errorf("pkg.Publish: %w", err))
 	}
-	if err := scanner.Err(); err != nil {
-		cmd.PrintErrln(err)
-	}
-
-	wg.Wait()
 }
 
 func splitAt(substring string) func(data []byte, atEOF bool) (advance int, token []byte, err error) {

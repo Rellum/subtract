@@ -1,0 +1,12 @@
+version: "3"
+services:
+  pubsub:
+    image: "eu.gcr.io/google.com/cloudsdktool/google-cloud-cli:emulators"
+    ports:
+      - "8089:8089"
+    container_name: subtract_pubsub_emulator
+    command: gcloud beta emulators pubsub start --host-port 0.0.0.0:8089
+    deploy:
+      resources:
+        limits:
+          memory: 1G
