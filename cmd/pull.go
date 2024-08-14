@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
+	"golang.org/x/time/rate"
 	"subtract/pkg"
 	"time"
 )
@@ -51,6 +52,9 @@ func init() {
 
 	pullCmd.Flags().IntVar(&maxMessages, "max", 1, "The number of messages to pull")
 	viper.BindPFlag("max", pullCmd.Flags().Lookup("max"))
+
+	pullCmd.Flags().Float64Var(&rateLimit, "rate", 0, "The number of messages to pull per second. Fractions are possible. Zero means no limit.")
+	viper.BindPFlag("rate", pullCmd.Flags().Lookup("rate"))
 }
 
 func pull(cmd *cobra.Command, args []string) {
@@ -63,8 +67,12 @@ func pull(cmd *cobra.Command, args []string) {
 	}
 
 	ch := logPullProgress(cmd, time.Second*5)
+	rl := rate.NewLimiter(rate.Limit(rateLimit), 1)
+	if rateLimit == 0 {
+		rl.SetLimit(rate.Inf)
+	}
 
-	err = pkg.ReceiveN(cmd.Context(), client, pubsubSubscription, maxMessages, func(c context.Context, m *pubsub.Message) {
+	err = pkg.Receive(cmd.Context(), client, pubsubSubscription, func(c context.Context, m *pubsub.Message) {
 		if verbose {
 			cmd.Println("received message", m.ID)
 		}
@@ -72,7 +80,7 @@ func pull(cmd *cobra.Command, args []string) {
 		ch <- struct{}{}
 
 		m.Ack()
-	})
+	}, pkg.WithTimeout(5*time.Second), pkg.WithMaxMessages(maxMessages), pkg.WithRateLimiter(rl))
 	if err == cmd.Context().Err() {
 		// no error
 	} else if err != nil {

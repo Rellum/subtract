@@ -3,15 +3,30 @@ package pkg
 import (
 	"cloud.google.com/go/pubsub"
 	"context"
+	"errors"
 	"fmt"
+	"sync/atomic"
 	"time"
 )
+import "golang.org/x/time/rate"
 
-func Receive(ctx context.Context, client *pubsub.Client, pubsubSubscription string, timeout time.Duration, receiver func(c context.Context, m *pubsub.Message)) error {
+var ErrTimeout = errors.New("timeout")
+var ErrMaxMessages = errors.New("max messages")
+
+func Receive(ctx context.Context, client *pubsub.Client, pubsubSubscription string, receiver func(c context.Context, m *pubsub.Message), opts ...func(*receiveOptions)) error {
 	cctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	ch := make(chan pubsub.Message, 100)
+	o := receiveOptions{
+		timeout:     time.Second * 5,
+		maxMessages: nil,
+		rateLimiter: rate.NewLimiter(rate.Inf, 1),
+	}
+	for i := range opts {
+		opts[i](&o)
+	}
+
+	ch := make(chan pubsub.Message)
 	subscription := client.Subscription(pubsubSubscription)
 	go func() {
 		err := subscription.Receive(cctx, func(c context.Context, m *pubsub.Message) {
@@ -24,32 +39,60 @@ func Receive(ctx context.Context, client *pubsub.Client, pubsubSubscription stri
 		})
 		fmt.Printf("pubsub.Client.Subscription.Receive error: %v\n", err)
 	}()
+
+	timer := time.NewTimer(o.timeout)
 	for {
-		timer := time.NewTimer(timeout)
 		select {
 		case m := <-ch:
 			if !timer.Stop() {
-				<-timer.C
+				timer.Reset(o.timeout)
 			}
+			if o.maxMessages != nil && o.maxMessages.Add(-1) < 0 {
+				cancel()
+				return ErrMaxMessages
+			}
+			if cctx.Err() != nil {
+				return cctx.Err()
+			}
+			if err := o.rateLimiter.Wait(cctx); err != nil {
+				return err
+			}
+
 			receiver(cctx, &m)
 
 		case <-timer.C:
 			cancel()
+			return ErrTimeout
+
+		case <-cctx.Done():
+			timer.Stop()
 			return cctx.Err()
 		}
 	}
 }
 
-func ReceiveN(ctx context.Context, client *pubsub.Client, pubsubSubscription string, timeout time.Duration, maxMessages int, receiver func(c context.Context, m *pubsub.Message)) error {
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	var count int
-	return Receive(ctx, client, pubsubSubscription, timeout, func(c context.Context, m *pubsub.Message) {
-		count++
-		if count > maxMessages {
-			cancel()
-			return
-		}
-		receiver(c, m)
-	})
+type receiveOptions struct {
+	timeout     time.Duration
+	maxMessages *atomic.Int64
+	rateLimiter *rate.Limiter
+}
+
+func WithTimeout(timeout time.Duration) func(*receiveOptions) {
+	return func(o *receiveOptions) {
+		o.timeout = timeout
+	}
+}
+
+func WithMaxMessages(maxMessages int) func(*receiveOptions) {
+	var m atomic.Int64
+	m.Store(int64(maxMessages))
+	return func(o *receiveOptions) {
+		o.maxMessages = &m
+	}
+}
+
+func WithRateLimiter(rateLimit *rate.Limiter) func(*receiveOptions) {
+	return func(o *receiveOptions) {
+		o.rateLimiter = rateLimit
+	}
 }

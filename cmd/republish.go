@@ -2,8 +2,6 @@ package cmd
 
 import (
 	"cloud.google.com/go/pubsub"
-	"context"
-	"fmt"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	"subtract/pkg"
@@ -44,29 +42,7 @@ func republish(cmd *cobra.Command, args []string) {
 		return
 	}
 
-	topic := client.Topic(pubsubTopic)
-	defer topic.Stop()
-
-	err = pkg.ReceiveN(cmd.Context(), client, pubsubSubscription, maxMessages, func(c context.Context, m *pubsub.Message) {
-		defer m.Nack()
-
-		if verbose {
-			cmd.Println("received message", m.ID)
-		}
-
-		_, err := topic.Publish(c, m).Get(context.Background())
-		if err != nil {
-			m.Nack()
-			cmd.PrintErrln(fmt.Errorf("publish: %w", err))
-			return
-		}
-
-		if verbose {
-			fmt.Printf("published message %s.\n", m.ID)
-		}
-
-		m.Ack()
-	})
+	err = pkg.Republish(cmd.Context(), client, pubsubTopic, pubsubSubscription, maxMessages)
 	if err != nil {
 		cmd.PrintErrln(err)
 	}

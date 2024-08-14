@@ -4,17 +4,19 @@ import (
 	"bufio"
 	"cloud.google.com/go/pubsub"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"sync"
 	"time"
 )
 
-func Publish(ctx context.Context, client *pubsub.Client, pubsubTopic string, scanner *bufio.Scanner, opts ...func(*options)) error {
+func Publish(ctx context.Context, client *pubsub.Client, pubsubTopic string, next func() (pubsub.Message, error), opts ...func(*publishOptions)) error {
 	cctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	o := options{
+	o := publishOptions{
 		statsFunc:     func(stats) {},
 		statsInterval: 5 * time.Second,
 	}
@@ -31,18 +33,17 @@ func Publish(ctx context.Context, client *pubsub.Client, pubsubTopic string, sca
 	var total int
 	var errs []error
 	go func() {
+		mu.Lock()
+		defer mu.Unlock()
 		for queuedErr := range errCh {
 			if errors.Is(queuedErr, context.Canceled) {
 				continue
 			}
-			mu.Lock()
 			total++
 			if queuedErr == nil {
-				mu.Unlock()
 				continue
 			}
 			errs = append(errs, queuedErr)
-			mu.Unlock()
 			if !o.continueOnErrors {
 				cancel()
 			}
@@ -69,12 +70,16 @@ func Publish(ctx context.Context, client *pubsub.Client, pubsubTopic string, sca
 	}()
 
 	var wg sync.WaitGroup
-	for scanner.Scan() {
+	for {
+		message, err := next()
+		if errors.Is(err, io.EOF) {
+			break
+		} else if err != nil {
+			return err
+		}
+
 		wg.Add(1)
-		b := append([]byte{}, scanner.Bytes()...)
-		res := topic.Publish(cctx, &pubsub.Message{
-			Data: b,
-		})
+		res := topic.Publish(cctx, &message)
 
 		go func() {
 			defer wg.Done()
@@ -82,15 +87,13 @@ func Publish(ctx context.Context, client *pubsub.Client, pubsubTopic string, sca
 			if err != nil {
 				errCh <- fmt.Errorf("message %s: %w", id, err)
 			} else {
+				message.Ack()
 				errCh <- nil
 			}
 		}()
 	}
 	wg.Wait()
 	close(errCh)
-	if err := scanner.Err(); err != nil {
-		return err
-	}
 
 	mu.Lock()
 	stats := stats{
@@ -107,46 +110,82 @@ func Publish(ctx context.Context, client *pubsub.Client, pubsubTopic string, sca
 	return nil
 }
 
+func ScanPayloads(scanner *bufio.Scanner) func() (pubsub.Message, error) {
+	return func() (pubsub.Message, error) {
+		more := scanner.Scan()
+		if !more {
+			return pubsub.Message{}, io.EOF
+		}
+
+		if err := scanner.Err(); err != nil {
+			return pubsub.Message{}, err
+		}
+
+		b := append([]byte{}, scanner.Bytes()...)
+		return pubsub.Message{
+			Data: b,
+		}, nil
+	}
+}
+
+func ScanMessages(scanner *bufio.Scanner) func() (pubsub.Message, error) {
+	return func() (pubsub.Message, error) {
+		more := scanner.Scan()
+		if !more {
+			return pubsub.Message{}, io.EOF
+		}
+
+		if err := scanner.Err(); err != nil {
+			return pubsub.Message{}, err
+		}
+
+		var m pubsub.Message
+		return m, json.Unmarshal(scanner.Bytes(), &m)
+	}
+}
+
 type stats struct {
 	IsComplete bool
 	Total      int
 	Errors     []error
 }
 
-type options struct {
+type publishOptions struct {
 	continueOnErrors bool
 	statsInterval    time.Duration
 	statsFunc        func(stats)
 }
 
-func WithContinueOnErrors() func(*options) {
-	return func(o *options) {
+func WithContinueOnErrors() func(*publishOptions) {
+	return func(o *publishOptions) {
 		o.continueOnErrors = true
 	}
 }
 
-func WithStatsLogging(interval time.Duration) func(*options) {
-	return withStatsFunc(interval, logStats)
+func WithStatsLogging(w io.Writer, interval time.Duration) func(*publishOptions) {
+	return withStatsFunc(interval, logStats(w))
 }
 
-func withStatsFunc(interval time.Duration, statsFunc func(stats)) func(*options) {
-	return func(o *options) {
+func withStatsFunc(interval time.Duration, statsFunc func(stats)) func(*publishOptions) {
+	return func(o *publishOptions) {
 		o.statsInterval = interval
 		o.statsFunc = statsFunc
 	}
 }
 
-func logStats(stats stats) {
-	errCount := len(stats.Errors)
+func logStats(w io.Writer) func(stats stats) {
+	return func(stats stats) {
+		errCount := len(stats.Errors)
 
-	progressText := "Progress"
-	if stats.IsComplete {
-		progressText = "Complete"
-	}
+		progressText := "Progress"
+		if stats.IsComplete {
+			progressText = "Complete"
+		}
 
-	var lastErrorText string
-	if errCount > 0 {
-		lastErrorText = fmt.Sprintf("; Last error: %v", stats.Errors[errCount-1])
+		var lastErrorText string
+		if errCount > 0 {
+			lastErrorText = fmt.Sprintf("; Last error: %v", stats.Errors[errCount-1])
+		}
+		fmt.Fprintf(w, "%s (Total: %d; Success: %d%s)\n", progressText, stats.Total, stats.Total-errCount, lastErrorText)
 	}
-	fmt.Printf("%s (Total: %d; Success: %d%s)\n", progressText, stats.Total, stats.Total-errCount, lastErrorText)
 }

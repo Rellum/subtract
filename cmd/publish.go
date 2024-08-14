@@ -48,7 +48,7 @@ func publish(cmd *cobra.Command, args []string) {
 		cmd.PrintErrln(fmt.Errorf("pubsub.NewClient: %w", err))
 	}
 
-	err = pkg.Publish(cmd.Context(), client, pubsubTopic, scanner, pkg.WithStatsLogging(5*time.Second))
+	err = pkg.Publish(cmd.Context(), client, pubsubTopic, pkg.ScanPayloads(scanner), pkg.WithStatsLogging(cmd.OutOrStdout(), 5*time.Second))
 	if err != nil {
 		cmd.PrintErrln(fmt.Errorf("pkg.Publish: %w", err))
 	}
