@@ -4,36 +4,42 @@ import (
 	"cloud.google.com/go/pubsub"
 	"context"
 	"fmt"
+	"golang.org/x/sync/errgroup"
+	"io"
+	"os"
 	"time"
 )
 
-func Republish(ctx context.Context, gcpProject string, pubsubTopic string, pubsubSubscription string, maxMessages int, verbose bool) error {
-	client, err := pubsub.NewClient(ctx, gcpProject)
-	if err != nil {
-		return err
-	}
+func Republish(ctx context.Context, client *pubsub.Client, pubsubTopic string, pubsubSubscription string, maxMessages int) error {
+	ch := make(chan pubsub.Message)
+	eg := new(errgroup.Group)
 
-	topic := client.Topic(pubsubTopic)
-	defer topic.Stop()
-
-	return ReceiveN(ctx, client, pubsubSubscription, 5*time.Second, maxMessages, func(c context.Context, m *pubsub.Message) {
-		defer m.Nack()
-
-		if verbose {
-			fmt.Println("received message", m.ID)
-		}
-
-		_, err := topic.Publish(c, m).Get(context.Background())
+	eg.Go(func() error {
+		err := Receive(ctx, client, pubsubSubscription, func(c context.Context, m *pubsub.Message) {
+			ch <- *m
+		}, WithTimeout(5*time.Second), WithMaxMessages(maxMessages))
+		close(ch)
 		if err != nil {
-			m.Nack()
-			fmt.Errorf("publish: %w", err)
-			return
+			return fmt.Errorf("ReceiveN: %w", err)
 		}
-
-		if verbose {
-			fmt.Printf("published message %s.\n", m.ID)
-		}
-
-		m.Ack()
+		return nil
 	})
+
+	eg.Go(func() error {
+		err := Publish(ctx, client, pubsubTopic, func() (pubsub.Message, error) {
+			m, ok := <-ch
+			if !ok {
+				return pubsub.Message{}, io.EOF
+			}
+			defer m.Ack()
+
+			return m, nil
+		}, WithPublishStatsLogging(os.Stdout, time.Second))
+		if err != nil {
+			return fmt.Errorf("Publish: %w", err)
+		}
+		return nil
+	})
+
+	return eg.Wait()
 }

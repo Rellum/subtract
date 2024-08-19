@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"cloud.google.com/go/pubsub"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -11,12 +12,12 @@ import (
 	"time"
 )
 
-func Publish(ctx context.Context, client *pubsub.Client, pubsubTopic string, next func() (pubsub.Message, error), opts ...func(*options)) error {
+func Publish(ctx context.Context, client *pubsub.Client, pubsubTopic string, next func() (pubsub.Message, error), opts ...func(*publishOptions)) error {
 	cctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	o := options{
-		statsFunc:     func(stats) {},
+	o := publishOptions{
+		statsFunc:     func(Stats) {},
 		statsInterval: 5 * time.Second,
 	}
 	for i := range opts {
@@ -32,18 +33,17 @@ func Publish(ctx context.Context, client *pubsub.Client, pubsubTopic string, nex
 	var total int
 	var errs []error
 	go func() {
+		mu.Lock()
+		defer mu.Unlock()
 		for queuedErr := range errCh {
 			if errors.Is(queuedErr, context.Canceled) {
 				continue
 			}
-			mu.Lock()
 			total++
 			if queuedErr == nil {
-				mu.Unlock()
 				continue
 			}
 			errs = append(errs, queuedErr)
-			mu.Unlock()
 			if !o.continueOnErrors {
 				cancel()
 			}
@@ -58,13 +58,13 @@ func Publish(ctx context.Context, client *pubsub.Client, pubsubTopic string, nex
 			select {
 			case <-ticker.C:
 				mu.Lock()
-				stats := stats{
+				Stats := Stats{
 					IsComplete: false,
 					Total:      total,
 					Errors:     append([]error{}, errs...),
 				}
 				mu.Unlock()
-				o.statsFunc(stats)
+				o.statsFunc(Stats)
 			}
 		}
 	}()
@@ -87,6 +87,7 @@ func Publish(ctx context.Context, client *pubsub.Client, pubsubTopic string, nex
 			if err != nil {
 				errCh <- fmt.Errorf("message %s: %w", id, err)
 			} else {
+				message.Ack()
 				errCh <- nil
 			}
 		}()
@@ -95,16 +96,16 @@ func Publish(ctx context.Context, client *pubsub.Client, pubsubTopic string, nex
 	close(errCh)
 
 	mu.Lock()
-	stats := stats{
+	Stats := Stats{
 		IsComplete: true,
 		Total:      total,
 		Errors:     append([]error{}, errs...),
 	}
 	mu.Unlock()
-	o.statsFunc(stats)
+	o.statsFunc(Stats)
 
-	if len(stats.Errors) > 0 {
-		return stats.Errors[len(stats.Errors)-1]
+	if len(Stats.Errors) > 0 {
+		return Stats.Errors[len(Stats.Errors)-1]
 	}
 	return nil
 }
@@ -127,46 +128,30 @@ func ScanPayloads(scanner *bufio.Scanner) func() (pubsub.Message, error) {
 	}
 }
 
-type stats struct {
-	IsComplete bool
-	Total      int
-	Errors     []error
+func ScanMessages(scanner *bufio.Scanner) func() (pubsub.Message, error) {
+	return func() (pubsub.Message, error) {
+		more := scanner.Scan()
+		if !more {
+			return pubsub.Message{}, io.EOF
+		}
+
+		if err := scanner.Err(); err != nil {
+			return pubsub.Message{}, err
+		}
+
+		var m pubsub.Message
+		return m, json.Unmarshal(scanner.Bytes(), &m)
+	}
 }
 
-type options struct {
+type publishOptions struct {
 	continueOnErrors bool
 	statsInterval    time.Duration
-	statsFunc        func(stats)
+	statsFunc        func(Stats)
 }
 
-func WithContinueOnErrors() func(*options) {
-	return func(o *options) {
+func WithContinueOnErrors() func(*publishOptions) {
+	return func(o *publishOptions) {
 		o.continueOnErrors = true
 	}
-}
-
-func WithStatsLogging(interval time.Duration) func(*options) {
-	return withStatsFunc(interval, logStats)
-}
-
-func withStatsFunc(interval time.Duration, statsFunc func(stats)) func(*options) {
-	return func(o *options) {
-		o.statsInterval = interval
-		o.statsFunc = statsFunc
-	}
-}
-
-func logStats(stats stats) {
-	errCount := len(stats.Errors)
-
-	progressText := "Progress"
-	if stats.IsComplete {
-		progressText = "Complete"
-	}
-
-	var lastErrorText string
-	if errCount > 0 {
-		lastErrorText = fmt.Sprintf("; Last error: %v", stats.Errors[errCount-1])
-	}
-	fmt.Printf("%s (Total: %d; Success: %d%s)\n", progressText, stats.Total, stats.Total-errCount, lastErrorText)
 }
